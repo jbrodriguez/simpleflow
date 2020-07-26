@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+
+function error {
+	NAME=$1
+
+	printf "$1"
+	exit 1
+}
+
+function work-begin {
+	if ! git diff --quiet; then
+		error "There are unsaved changes in your current branch. Please commit changes and try again."
+	fi
+
+	UNPUSHED=$(git log origin/master..HEAD 2> /dev/null)
+	if [[ ! -z $UNPUSHED ]]; then
+		error "There are unpushed commits in local master. Push them and try again."
+	fi
+
+	CURRENT=$(git rev-parse --abbrev-ref HEAD)
+	if [[ $CURRENT != "master" ]]; then
+		error "Can begin work only from master branch."
+	fi
+
+	if [[ "$#" -ne 1  ]]; then
+		error "Must provide work branch name (i.e: issue-23, issue-1, etc.)"
+	fi
+
+	BRANCH=$1
+
+	git checkout master
+
+	git pull --rebase origin master
+	git checkout -b wrk/$BRANCH
+}
+
+function deploy-begin {
+	if ! git diff --quiet; then
+		error "There are unsaved changes in your current branch. Please commit changes and try again."
+	fi
+
+	CURRENT=$(git rev-parse --abbrev-ref HEAD)
+	if [[ $CURRENT != "master" ]]; then
+		error "Can begin release only from master branch."
+	fi
+
+	if [[ "$#" -ne 1  ]]; then
+		error "Must provide release branch name (i.e: 1.2.0, 1.3.1, etc.)"
+	fi
+
+	BRANCH=$1
+
+	git checkout master
+}
+
+function ota-begin {
+	deploy-begin $@
+	git checkout -b ota/$BRANCH
+}
+
+function rel-begin {
+	deploy-begin $@
+	git checkout -b rel/$BRANCH
+}
+
+function fix-begin {
+	if ! git diff --quiet; then
+		error "There are unsaved changes in your current branch. Please commit changes and try again."
+	fi
+
+	if [[ "$#" -ne 2  ]]; then
+		error "Must provide branch name (i.e.: issue-23) and base tag (i.e.: 1.23.6)"
+	fi
+
+	BRANCH=$1
+	BASE=$2
+
+	git checkout $BASE
+	git checkout -b fix/$BRANCH
+}
+
+function work-end {
+	if ! git diff --quiet; then
+		error "There are unsaved changes in your current branch. Please commit changes and try again."
+	fi
+
+	BRANCH=$(git rev-parse --abbrev-ref HEAD 2> /dev/null)
+	if [[ -z $BRANCH ]]; then
+		error "Unable to obtain branch name. Please check and try again."
+	fi
+
+	if [[ "$BRANCH" != wrk* ]]; then
+		error "This command should be used only from a wrk branch\n"
+	fi
+
+	CLOSES=$1
+	if [[ -z $CLOSES ]]; then
+		error "Define the number of the issue that is getting closed (i.e.: swe 23)"
+	fi
+
+	HEADER="Closes #$CLOSES"
+	# HEADER="Merge branch '$BRANCH'"
+	# CONTENT="Closes #$CLOSES"
+
+	git checkout master
+	git pull --rebase origin master
+
+	git checkout $BRANCH
+	# GIT_EDITOR="/Volumes/Users/kayak/bin/git-commit-atom" git rebase -i master # deal with conflicts here
+	GIT_EDITOR="code -rw" git rebase -i master # deal with conflicts here
+
+	if [ $? -eq 0 ]; then
+		git checkout master
+		# git merge --no-ff -m "$(printf "$HEADER\n$CONTENT")" $BRANCH
+		git merge --no-ff -m "${HEADER}" $BRANCH
+
+		git push origin master
+		git branch -d $BRANCH
+		git push origin --delete $BRANCH 2> /dev/null
+	else
+		echo $BRANCH > branch.out
+
+		echo "Check for merge conflicts"
+		exit 1
+	fi
+}
+
+function branch-test {
+	if ! git diff --quiet; then
+		error "There are unsaved changes in your current branch. Please commit changes and try again."
+	fi
+
+	BRANCH=$(git rev-parse --abbrev-ref HEAD)
+	if [[ -z $BRANCH ]]; then
+		error "Unable to obtain branch name. Please check and try again."
+	fi
+
+	git push origin $BRANCH
+}
+
+function branch-release {
+	# if ! git diff --quiet; then
+	# 	error "There are unsaved changes in your current branch. Please commit changes and try again."
+	# fi
+	BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+	if [[ "$BRANCH" == wrk* ]]; then
+		error "Release should start from a rel, fix or ota branch\n"
+	fi
+
+	VERSION_FILE=${VERSION_FILE:-VERSION}
+	VERSION=$(cat $VERSION_FILE 2> /dev/null)
+
+	if [[ -z $VERSION ]]; then
+		error "No VERSION file available. Please check and try again."
+	fi
+
+	git add -A
+	git commit -m "Release $VERSION"
+
+	git tag $VERSION
+	git push --tags origin $BRANCH
+
+	# git checkout current
+	# git merge $BRANCH
+	#
+	# git checkout $BRANCH
+}
+
+# use sre for ending a release, no arguments
+# use sfe <issue to be closed> for ending a fix
+function branch-end {
+	if ! git diff --quiet; then
+		error "There are unsaved changes in your current branch. Please commit changes and try again."
+	fi
+
+	BRANCH=$(git rev-parse --abbrev-ref HEAD 2> /dev/null)
+	if [[ -z $BRANCH ]]; then
+		error "Unable to obtain branch name. Please check and try again."
+	fi
+
+	HEADER="Merge branch '$BRANCH'"
+	CLOSES=$1
+	if [[ ! -z $CLOSES ]]; then
+		HEADER="Closes #$CLOSES"
+	fi
+
+	git checkout master
+	git pull --rebase origin master
+
+	# if [[ -z $CONTENT ]]; then
+	# 	git merge --no-ff $BRANCH
+	# else
+	# 	git merge --no-ff -m "${HEADER}" $BRANCH
+	# fi
+	git merge --no-ff $BRANCH
+
+	if [ $? -eq 0 ]; then
+		git push --tags origin master
+		git branch -d $BRANCH
+		git push origin --delete $BRANCH 2> /dev/null
+	else
+		echo $BRANCH > branch.out
+
+		echo "Check for merge conflicts"
+		exit 1
+	fi
+}
+
+function branch-conflict {
+	if ! git diff --quiet; then
+		error "There are unsaved changes in your current branch. Please commit changes and try again."
+	fi
+
+	BRANCH_FILE=${BRANCH_FILE:-branch.out}
+	BRANCH=$(cat $BRANCH_FILE)
+
+	git branch -d $BRANCH
+
+	if [ $? -eq 0 ]; then
+		git push origin --delete $BRANCH 2> /dev/null
+		git push --tags origin master
+		rm $BRANCH_FILE
+	fi
+}
+
+case $1 in
+	--help|-h) echo -e "$USAGE"; exit 0;;
+	--version|-v) usage-version ;;
+	work-begin) shift; work-begin $@;;
+	rel-begin) shift; rel-begin $@;;
+	ota-begin) shift; ota-begin $@;;
+	fix-begin) shift; fix-begin $@;;
+	branch-test) shift; branch-test $@;;
+	rel-publish) shift; branch-release $@;;
+	ota-publish) shift; branch-release $@;;
+	fix-publish) shift; branch-release $@;;
+	work-end) shift; work-end $@;;
+	rel-end) shift; branch-end $@;;
+	ota-end) shift; branch-end $@;;
+	fix-end) shift; branch-end $@;;
+	branch-conflict) branch-conflict ;;
+	*) echo "Unknown arguments: $@"; usage-help;;
+esac
